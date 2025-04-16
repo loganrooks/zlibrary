@@ -38,3 +38,9 @@ class NoProfileError(Exception):
 class NoIdError(Exception):
     def __init__(self):
         super().__init__("No ID provided for the book lookup.")
+
+
+
+class BookNotFound(Exception):
+    def __init__(self, message):
+        super().__init__(message)

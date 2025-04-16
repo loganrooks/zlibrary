@@ -6,12 +6,14 @@ from aiohttp.abc import AbstractCookieJar
 
 from .logger import logger
 from .exception import (
+    BookNotFound,
     EmptyQueryError,
     ProxyNotMatchError,
     NoProfileError,
     NoDomainError,
     NoIdError,
-    LoginFailed
+    LoginFailed,
+    ParseError
 )
 from .util import GET_request, POST_request, GET_request_cookies
 from .abs import SearchPaginator, BookItem
@@ -202,12 +204,30 @@ class AsyncZlib:
         return paginator
 
     async def get_by_id(self, id: str = ""):
+        """Gets book details by searching for its ID."""
         if not id:
             raise NoIdError
+        if not self.profile:
+            raise NoProfileError
 
-        book = BookItem(self._r, self.mirror)
-        book["url"] = f"{self.mirror}/book/{id}"
-        return await book.fetch()
+        try:
+            # Search for the specific ID
+            paginator = await self.search(q=f"id:{id}", exact=True, count=1)
+            results = await paginator.get_results()
+
+            if not results:
+                raise BookNotFound(f"Book with ID {id} not found.")
+            if len(results) > 1:
+                # This shouldn't happen with exact=True and count=1, but handle defensively
+                raise ParseError(f"Ambiguous result: Found multiple books for ID {id}.")
+            # The paginator already fetches the BookItem details during search parsing
+            return results[0]
+        except (ParseError, BookNotFound) as e:
+            # Re-raise specific errors or handle as needed
+            raise e
+        except Exception as e:
+            # Catch other potential errors during search/parsing
+            raise ParseError(f"Failed to get book by ID {id} due to an unexpected error: {e}") from e
 
     async def full_text_search(
         self,

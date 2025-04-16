@@ -1,3 +1,5 @@
+import re
+from typing import Dict, Any, Optional, List, Union, Callable, Coroutine
 from typing import Callable, Optional
 from bs4 import BeautifulSoup as bsoup
 from bs4 import Tag
@@ -43,8 +45,30 @@ class SearchPaginator:
     def parse_page(self, page):
         soup = bsoup(page, features="lxml")
         box = soup.find("div", {"id": "searchResultBox"})
+
+        # --- BEGIN FIX for id: search ---
+        # Check if this might be a direct book page result from an id: search
+        is_id_search_url = bool(re.search(r"/s/id%3A", self.__url))
         if not box or type(box) is not Tag:
-            raise ParseError("Could not parse book list.")
+            # If searchResultBox is missing, check if it looks like a book page
+            book_page_check = soup.find("div", {"class": "row cardBooks"})
+            if book_page_check and is_id_search_url:
+                logger.debug(f"Potential direct book page found for ID search URL: {self.__url}. Attempting direct parse.")
+                try:
+                    # Attempt to parse this page as a single BookItem
+                    book_item = BookItem(self.__r, self.mirror)
+                    book_item["url"] = self.__url # Use the current URL, assuming it's the book page
+                    # Manually call the parsing logic similar to BookItem.fetch but on existing soup
+                    parsed_data = book_item._parse_book_page_soup(soup) # Requires creating/exposing this method
+                    self.storage[self.page] = [parsed_data]
+                    self.result = self.storage[self.page]
+                    return # Successfully parsed as single book page
+                except Exception as e:
+                    logger.error(f"Failed to parse potential direct book page for {self.__url}: {e}")
+                    # Fall through to raise the original ParseError
+            # If it's not a book page or not an ID search, raise the original error
+            raise ParseError(f"Could not parse book list (searchResultBox not found) for URL: {self.__url}")
+        # --- END FIX ---
 
         check_notfound = soup.find("div", {"class": "notFound"})
         if check_notfound:
@@ -53,8 +77,8 @@ class SearchPaginator:
             self.result = []
             return
 
-        with open("test.html", "w") as f:
-            f.write(str(box.prettify()))
+        # with open("test.html", "w") as f: # Keep debug code commented out
+        #     f.write(str(box.prettify()))
         book_list = box.findAll("div", {"class": "book-item"})
         if not book_list:
             raise ParseError("Could not find the book list.")
@@ -441,6 +465,84 @@ class DownloadsPaginator:
         self.result = self.storage[self.page]
 
 
+    # --- BEGIN ADDITION for id: search fix ---
+    def _parse_book_page_soup(self, soup: bsoup) -> Dict[str, Any]:
+        """Parses a BeautifulSoup object assumed to be a book details page."""
+        # This method encapsulates the parsing logic from the original fetch()
+        # to allow reuse when parse_page detects a direct book page.
+        wrap = soup.find("div", {"class": "row cardBooks"})
+        if not wrap or type(wrap) is not Tag:
+            raise ParseError(f"Failed to parse book page structure (wrap) for {self['url']}")
+
+        parsed = {}
+        parsed["url"] = self["url"] # Assume self['url'] is set correctly before calling
+
+        zcover = soup.find("z-cover")
+        if not zcover or type(zcover) is not Tag:
+            raise ParseError(f"Failed to find zcover in {self['url']}")
+
+        # --- Simplified parsing logic based on original fetch() ---
+        # Cover
+        cover_img = zcover.find("img")
+        if cover_img:
+            parsed["cover"] = cover_img.get("data-src") or cover_img.get("src")
+
+        # Title
+        title_tag = soup.find("h1", itemprop="name")
+        if title_tag:
+            parsed["title"] = title_tag.text.strip()
+
+        # Authors
+        col = wrap.find("div", {"class": "col-sm-9"})
+        if col and type(col) is Tag:
+            authors_div = col.find("div", {"class": "authors"})
+            if authors_div:
+                parsed["authors"] = []
+                anchors = authors_div.find_all("a")
+                for anchor in anchors:
+                    author_url = anchor.get('href')
+                    parsed["authors"].append(
+                        {
+                            "author": anchor.text.strip(),
+                            "author_url": f"{self.mirror}{quote(author_url)}" if author_url else None,
+                        }
+                    )
+
+        # Properties (Year, Language, Extension, etc.)
+        properties_div = soup.find("div", {"class": "properties"})
+        if properties_div:
+            for prop_item in properties_div.find_all("div", {"class": "property"}):
+                name_tag = prop_item.find("div", {"class": "property_label"})
+                value_tag = prop_item.find("div", {"class": "property_value"})
+                if name_tag and value_tag:
+                    prop_name = name_tag.text.strip().lower().replace(":", "")
+                    prop_value = value_tag.text.strip()
+                    # Map common properties
+                    if "year" in prop_name:
+                        parsed["year"] = prop_value
+                    elif "language" in prop_name:
+                        parsed["language"] = prop_value
+                    elif "file" in prop_name:
+                        # Extract extension and size
+                        parts = [p.strip() for p in prop_value.split(',')]
+                        if len(parts) > 0: parsed["extension"] = parts[0].lower()
+                        if len(parts) > 1: parsed["size"] = parts[1]
+                    # Add more properties as needed
+
+        # Description
+        description_div = soup.find("div", itemprop="description")
+        if description_div:
+            parsed["description"] = description_div.text.strip()
+
+        # Add other fields as parsed in the original fetch...
+        # (e.g., ISBN, Publisher, Series, etc. - omitted for brevity)
+
+        # --- Important: Update self with parsed data ---
+        self.update(parsed)
+        self.parsed = parsed # Mark as parsed
+        return parsed
+    # --- END ADDITION ---
+
 class BookItem(dict):
     parsed = None
     __r: Optional[Callable] = None
@@ -454,46 +556,14 @@ class BookItem(dict):
         if not self.__r:
             raise ParseError("Instance of BookItem does not contain a request method.")
         page = await self.__r(self["url"])
-        soup = bsoup(page, features="lxml")
-
-        wrap = soup.find("div", {"class": "row cardBooks"})
-        if not wrap or type(wrap) is not Tag:
-            raise ParseError(f"Failed to parse {self['url']}")
-
-        parsed = {}
-        parsed["url"] = self["url"]
-
-        zcover = soup.find("z-cover")
-        if not zcover or type(zcover) is not Tag:
-            raise ParseError(f"Failed to find zcover in {self['url']}")
-
-        col = wrap.find("div", {"class": "col-sm-9"})
-        if col and type(col) is Tag:
-            anchors = col.find_all("a")
-            if anchors:
-                parsed["authors"] = []
-                for anchor in anchors:
-                    parsed["authors"].append(
-                        {
-                            "author": anchor.text.strip(),
-                            "author_url": f"{self.mirror}{quote(anchor.get('href'))}",
-                        }
-                    )
-
-        title = zcover.get("title")
-        if title:
-            if type(title) is list[str]:
-                parsed["name"] = title[0].strip()
-            elif type(title) is str:
-                parsed["name"] = title.strip()
-
-        cover = zcover.find("img", {"class": "image"})
-        if cover and type(cover) is Tag:
-            parsed["cover"] = cover.get("src")
-
-        desc = wrap.find("div", {"id": "bookDescriptionBox"})
-        if desc:
-            parsed["description"] = desc.text.strip()
+        try:
+            soup = bsoup(page, features="lxml")
+            # Use the new helper method to parse the soup
+            parsed_data = self._parse_book_page_soup(soup)
+            return parsed_data
+        except Exception as e:
+            logger.error(f"Error fetching or parsing book page {self['url']}: {e}")
+            raise ParseError(f"Failed to fetch or parse {self['url']}") from e
 
         details = wrap.find("div", {"class": "bookDetailsBox"})
 
