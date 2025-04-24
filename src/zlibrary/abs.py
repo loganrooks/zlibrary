@@ -43,36 +43,48 @@ class SearchPaginator:
         return f"<Paginator [{self.__url}], count {self.count}, len(result): {len(self.result)}, pages in storage: {len(self.storage.keys())}>"
 
     def parse_page(self, page):
+        logger.debug(f"Parsing page for URL: {self.__url}")
+        # Log truncated raw HTML for debugging purposes
+        html_excerpt = page[:2000].replace('\n', ' ') + ('...' if len(page) > 2000 else '')
+        logger.debug(f"Raw HTML excerpt: {html_excerpt}")
+
         soup = bsoup(page, features="lxml")
         box = soup.find("div", {"id": "searchResultBox"})
+        logger.debug(f"Found #searchResultBox: {bool(box)}")
 
         # --- BEGIN FIX for id: search ---
         # Check if this might be a direct book page result from an id: search
         is_id_search_url = bool(re.search(r"/s/id%3A", self.__url))
         if not box or type(box) is not Tag:
+            logger.debug("#searchResultBox not found or not a Tag.")
             # If searchResultBox is missing, check if it looks like a book page
             book_page_check = soup.find("div", {"class": "row cardBooks"})
             if book_page_check and is_id_search_url:
-                logger.debug(f"Potential direct book page found for ID search URL: {self.__url}. Attempting direct parse.")
+                logger.debug("Potential direct book page detected.")
                 try:
+                    logger.debug("Attempting direct parse with _parse_book_page_soup.")
                     # Attempt to parse this page as a single BookItem
                     book_item = BookItem(self.__r, self.mirror)
                     book_item["url"] = self.__url # Use the current URL, assuming it's the book page
                     # Manually call the parsing logic similar to BookItem.fetch but on existing soup
                     parsed_data = book_item._parse_book_page_soup(soup) # Requires creating/exposing this method
-                    self.storage[self.page] = [parsed_data]
+                    logger.debug(f"Direct parse result: {parsed_data}")
+                    self.storage[self.page] = [parsed_data] if parsed_data else [] # Ensure list even if parse fails slightly
                     self.result = self.storage[self.page]
+                    logger.debug(f"Direct parse successful, result set: {self.result}")
                     return # Successfully parsed as single book page
                 except Exception as e:
-                    logger.error(f"Failed to parse potential direct book page for {self.__url}: {e}")
+                    logger.error(f"Direct parse FAILED for {self.__url}: {e}", exc_info=True)
                     # Fall through to raise the original ParseError
             # If it's not a book page or not an ID search, raise the original error
+            logger.error(f"Raising ParseError: Could not parse book list (searchResultBox not found and not a direct book page) for URL: {self.__url}")
             raise ParseError(f"Could not parse book list (searchResultBox not found) for URL: {self.__url}")
         # --- END FIX ---
 
+        # This part executes if #searchResultBox WAS found
         check_notfound = soup.find("div", {"class": "notFound"})
         if check_notfound:
-            logger.debug("Nothing found.")
+            logger.debug("Standard search page returned 'notFound'.")
             self.storage[self.page] = []
             self.result = []
             return
@@ -80,11 +92,17 @@ class SearchPaginator:
         # with open("test.html", "w") as f: # Keep debug code commented out
         #     f.write(str(box.prettify()))
         book_list = box.findAll("div", {"class": "book-item"})
+        logger.debug(f"Found {len(book_list)} 'book-item' divs within #searchResultBox.")
+        # Log first item if found for structure check
+        if book_list:
+             logger.debug(f"First book-item structure: {str(book_list[0])[:500]}...")
+
         if not book_list:
+            logger.warning("No 'book-item' divs found within #searchResultBox. Raising ParseError.")
             raise ParseError("Could not find the book list.")
 
         self.storage[self.page] = []
-
+        logger.debug("Parsing standard book list items...")
         for idx, book in enumerate(book_list, start=1):
             js = BookItem(self.__r, self.mirror)
 

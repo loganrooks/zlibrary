@@ -212,21 +212,46 @@ class AsyncZlib:
 
         try:
             # Search for the specific ID
-            paginator = await self.search(q=f"id:{id}", exact=True, count=1)
-            results = await paginator.get_results()
+            search_query = f"id:{id}"
+            search_url_for_log = f"{self.mirror}/s/{quote(search_query)}?exact=1" # Construct approx URL for logging
+            logger.debug(f"get_by_id: Attempting search with query: '{search_query}' (URL approx: {search_url_for_log})")
+            paginator = await self.search(q=search_query, exact=True, count=1)
+            # Assuming paginator.init() was called within self.search and parsed the first page
+            # We need the results from the paginator's storage or result attribute
+            results = paginator.result # Access the parsed results directly
 
             if not results:
-                raise BookNotFound(f"Book with ID {id} not found.")
+                # Explicitly log that the search returned no results
+                logger.warning(f"get_by_id: Search for '{search_query}' (URL approx: {search_url_for_log}) returned 0 results.")
+                raise BookNotFound(f"Book with ID {id} not found via search.")
+
             if len(results) > 1:
                 # This shouldn't happen with exact=True and count=1, but handle defensively
-                raise ParseError(f"Ambiguous result: Found multiple books for ID {id}.")
-            # The paginator already fetches the BookItem details during search parsing
-            return results[0]
-        except (ParseError, BookNotFound) as e:
-            # Re-raise specific errors or handle as needed
-            raise e
+                logger.warning(f"get_by_id: Ambiguous result: Found {len(results)} books for ID {id} via search. Returning first.")
+                # raise ParseError(f"Ambiguous result: Found multiple books for ID {id}.") # Decide if this should be an error
+
+            book_item = results[0]
+            logger.debug(f"get_by_id: Found book via search: {book_item.get('name')}")
+            # Ensure the full book details are fetched if needed (search results might be partial)
+            # Note: The previous fix assumed BookItem.fetch was needed, but the current code
+            # implies the paginator might already contain full details if parsing succeeded.
+            # Let's keep the check for now, but it might be redundant if abs.py parsing is complete.
+            if not book_item.parsed:
+                 logger.debug(f"get_by_id: Search result for id:{id} is partial or not marked parsed, fetching full details...")
+                 await book_item.fetch() # fetch() should ideally mark item as parsed
+                 logger.debug(f"get_by_id: Full details fetched for id:{id}")
+
+            return book_item
+        except BookNotFound as bnf:
+             # Re-raise BookNotFound specifically if caught from search/fetch
+             logger.warning(f"get_by_id({id}) resulted in BookNotFound: {bnf}")
+             raise bnf
+        except ParseError as pe:
+             logger.error(f"get_by_id({id}) resulted in ParseError during search/fetch: {pe}", exc_info=True)
+             raise pe
         except Exception as e:
             # Catch other potential errors during search/parsing
+            logger.error(f"get_by_id({id}) failed due to an unexpected error: {e}", exc_info=True)
             raise ParseError(f"Failed to get book by ID {id} due to an unexpected error: {e}") from e
 
     async def full_text_search(
